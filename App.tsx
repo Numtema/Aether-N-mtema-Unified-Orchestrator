@@ -3,9 +3,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Zap, Activity, Share2, Users, Terminal, Settings, 
   Sun, Moon, Layout, Play, Pause, Plus, RefreshCw, 
-  ChevronRight, Shield, Server, Box, Cpu, Send, Loader2, X, Download, FileText, Menu, ChevronLeft
+  ChevronRight, Shield, Server, Box, Cpu, Send, Loader2, X, Download, FileText, Menu, ChevronLeft, AlertTriangle, Info, Clock
 } from 'lucide-react';
-import { ViewMode, ThemeMode, Flow, Task, Agent, MCPConfig } from './types';
+import { ViewMode, ThemeMode, Flow, Task, Agent, MCPConfig, TaskStatus } from './types';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import GraphVisualizer from './components/GraphVisualizer';
@@ -25,17 +25,23 @@ const App: React.FC = () => {
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [missionInput, setMissionInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
+  const [systemMessage, setSystemMessage] = useState<{ text: string, type: 'error' | 'warning' | 'info' } | null>(null);
   
   const gemini = useRef(new GeminiService());
   const activeFlow = flows[activeFlowIndex];
   const flowStatusRef = useRef<string>('idle');
   const flowsRef = useRef<Flow[]>([]);
 
+  // Sync flows reference for the orchestrator
+  useEffect(() => {
+    flowsRef.current = flows;
+  }, [flows]);
+
   useEffect(() => {
     const savedFlows = StorageService.getFlows();
     if (savedFlows.length > 0) {
       setFlows(savedFlows);
-      flowsRef.current = savedFlows;
     } else {
       const demoFlow: Flow = {
         id: 'demo-1',
@@ -46,21 +52,30 @@ const App: React.FC = () => {
         workflowGraph: { nodes: [], edges: [] }
       };
       setFlows([demoFlow]);
-      flowsRef.current = [demoFlow];
     }
   }, []);
 
   useEffect(() => {
     if (flows.length > 0) {
       StorageService.saveFlows(flows);
-      flowsRef.current = flows;
     }
     if (activeFlow) flowStatusRef.current = activeFlow.status;
   }, [flows, activeFlow]);
 
+  // Cooldown timer
+  useEffect(() => {
+    if (cooldownSeconds > 0) {
+      const timer = setInterval(() => setCooldownSeconds(s => s - 1), 1000);
+      return () => clearInterval(timer);
+    } else if (cooldownSeconds === 0 && systemMessage?.type === 'warning') {
+      setSystemMessage(null);
+    }
+  }, [cooldownSeconds]);
+
   const handleDeploy = async () => {
-    if (!missionInput.trim()) return;
+    if (!missionInput.trim() || cooldownSeconds > 0) return;
     setIsPlanning(true);
+    setSystemMessage(null);
     try {
       const plan = await gemini.current.planWorkflow(missionInput);
       const newFlow: Flow = {
@@ -71,7 +86,7 @@ const App: React.FC = () => {
         tasks: plan.tasks.map((t: any) => ({
           ...t,
           flowId: `flow-${Date.now()}`,
-          status: 'todo',
+          status: 'todo' as TaskStatus,
           inputData: {},
           requiresApproval: t.requiresApproval || false
         })),
@@ -86,8 +101,13 @@ const App: React.FC = () => {
       setActiveFlowIndex(0);
       setShowDeployModal(false);
       setMissionInput('');
-    } catch (error) {
-      console.error("Planning failed", error);
+    } catch (error: any) {
+      if (error.message === "QUOTA_EXHAUSTED") {
+        setCooldownSeconds(60);
+        setSystemMessage({ text: "API rate limit reached. System cooling down...", type: 'warning' });
+      } else {
+        setSystemMessage({ text: error.message || "Failed to architect mission.", type: 'error' });
+      }
     } finally {
       setIsPlanning(false);
     }
@@ -106,14 +126,14 @@ const App: React.FC = () => {
     flowStatusRef.current = newStatus;
     setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: newStatus } : f));
     if (newStatus === 'running') {
-      console.log("[Engine] Starting Orchestrator for:", activeFlow.name);
+      setSystemMessage(null);
       runOrchestrator();
     }
   };
 
   const runOrchestrator = async () => {
     const executeNext = async () => {
-      if (flowStatusRef.current !== 'running') return;
+      if (flowStatusRef.current !== 'running' || cooldownSeconds > 0) return;
 
       const currentFlow = flowsRef.current[activeFlowIndex];
       if (!currentFlow) return;
@@ -131,20 +151,19 @@ const App: React.FC = () => {
           setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: 'completed' } : f));
           return;
         }
-        setTimeout(executeNext, 2000);
+        setTimeout(executeNext, 8000); // Poll slowly
         return;
       }
 
+      // Process only one task at a time to stay within quota
       const task = executableTasks[0];
       
-      // Step 1: Decomposition Check (Recursive logic)
-      if (task.status === 'todo') {
-        updateTask(task.id, { status: 'decomposing' });
-        try {
-          const decomposition = await gemini.current.decomposeTask(task, "Current project graph analysis.");
+      try {
+        if (task.status === 'todo') {
+          updateTask(task.id, { status: 'decomposing' });
+          const decomposition = await gemini.current.decomposeTask(task, "Recursive context.");
+          
           if (decomposition.shouldDecompose && decomposition.subtasks) {
-            console.log(`[Engine] Decomposing task: ${task.title} into ${decomposition.subtasks.length} sub-tasks.`);
-            
             const subtasks: Task[] = decomposition.subtasks.map((st: any) => ({
               id: `${task.id}.${st.id}`,
               flowId: task.flowId,
@@ -152,8 +171,8 @@ const App: React.FC = () => {
               title: st.title,
               description: st.description,
               assignedAgentId: st.agentRole,
-              status: 'todo',
-              dependencies: [...task.dependencies], // Sub-tasks inherit parent's dependencies
+              status: 'todo' as TaskStatus,
+              dependencies: [...task.dependencies],
               inputData: {},
               requiresApproval: false
             }));
@@ -161,29 +180,21 @@ const App: React.FC = () => {
             setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
               ...f,
               tasks: [
-                ...f.tasks.map(t => t.id === task.id ? { ...t, status: 'todo', dependencies: [...t.dependencies, ...subtasks.map(s => s.id)] } : t),
+                ...f.tasks.map(t => t.id === task.id ? { ...t, status: 'todo' as TaskStatus, dependencies: [...t.dependencies, ...subtasks.map(s => s.id)] } : t),
                 ...subtasks
-              ]
+              ] as Task[]
             } : f));
             
-            setTimeout(executeNext, 500);
+            setTimeout(executeNext, 12000); // Significant pause after decomposition
             return;
           } else {
             updateTask(task.id, { status: 'in_progress' });
           }
-        } catch (e) {
-          console.error("Decomposition failed, proceeding with original task", e);
-          updateTask(task.id, { status: 'in_progress' });
         }
-      }
 
-      // Step 2: Normal Execution
-      try {
         const agents = StorageService.getAgents();
         const mockAgent = agents.find(a => a.role === task.assignedAgentId) || agents[0];
-        
-        console.log(`[Engine] Executing: ${task.title} with agent ${mockAgent.name}`);
-        const result = await gemini.current.executeTask(task, mockAgent, "Pipeline data context placeholder.");
+        const result = await gemini.current.executeTask(task, mockAgent, "Task execution phase.");
         
         updateTask(task.id, { 
           status: 'completed', 
@@ -193,27 +204,23 @@ const App: React.FC = () => {
             artifactType: result.includes('```') ? 'code' : 'markdown' 
           } 
         });
+
       } catch (err: any) {
-        console.error(`[Engine] Task Failed: ${task.title}`, err);
+        if (err.message === "QUOTA_EXHAUSTED") {
+          setCooldownSeconds(60);
+          setSystemMessage({ text: "Quota exceeded. Engine paused for cooling.", type: 'warning' });
+          toggleFlowExecution();
+          return;
+        }
         updateTask(task.id, { status: 'failed', error: err.message });
       }
       
       if (flowStatusRef.current === 'running') {
-        setTimeout(executeNext, 1000);
+        setTimeout(executeNext, 10000); // Throttling
       }
     };
 
     executeNext();
-  };
-
-  const downloadProjectReport = () => {
-    if (!activeFlow) return;
-    const blob = new Blob([JSON.stringify(activeFlow, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${activeFlow.name.replace(/\s+/g, '_')}_Report.json`;
-    a.click();
   };
 
   return (
@@ -230,51 +237,59 @@ const App: React.FC = () => {
       />
 
       <main className="flex-1 flex flex-col min-w-0 relative">
+        {/* System Message HUD */}
+        {(systemMessage || cooldownSeconds > 0) && (
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-[60] w-[90%] max-w-2xl animate-in slide-in-from-top-4 duration-500">
+             <div className={`glass p-4 rounded-2xl border flex items-center justify-between gap-6 shadow-2xl ${systemMessage?.type === 'error' ? 'border-red-500/50 shadow-red-500/10' : 'border-amber-500/50 shadow-amber-500/10'}`}>
+                <div className="flex items-center gap-4">
+                   <div className={`p-2 rounded-lg text-black ${systemMessage?.type === 'error' ? 'bg-red-500' : 'bg-amber-500 animate-pulse'}`}>
+                      {systemMessage?.type === 'error' ? <AlertTriangle size={20} /> : <Clock size={20} />}
+                   </div>
+                   <div className="space-y-0.5">
+                      <p className={`text-[10px] font-black uppercase tracking-widest ${systemMessage?.type === 'error' ? 'text-red-500' : 'text-amber-500'}`}>
+                        {systemMessage?.type === 'error' ? 'System Error' : 'Engine Cooldown'}
+                      </p>
+                      <p className="text-[11px] font-bold opacity-80">
+                        {systemMessage?.text} {cooldownSeconds > 0 ? `(${cooldownSeconds}s left)` : ''}
+                      </p>
+                   </div>
+                </div>
+                <button onClick={() => setSystemMessage(null)} className="p-2 hover:bg-white/5 rounded-lg opacity-50 hover:opacity-100 transition-all">
+                   <X size={18} />
+                </button>
+             </div>
+          </div>
+        )}
+
         <header className={`h-16 shrink-0 border-b flex items-center justify-between px-8 z-20 ${theme === 'dark' ? 'bg-slate-950/50 border-white/10' : 'bg-white/50 border-black/5'} backdrop-blur-md`}>
           <div className="flex items-center gap-4">
-            <button 
-              onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-              className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-all active:scale-90"
-            >
+            <button onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-all active:scale-90">
               {isSidebarCollapsed ? <Menu size={20} /> : <ChevronLeft size={20} />}
             </button>
             <div className="h-4 w-px bg-slate-700/50 mx-2" />
             <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${activeFlow?.status === 'running' ? 'bg-green-500 animate-pulse' : activeFlow?.status === 'paused' ? 'bg-amber-500' : 'bg-slate-500'}`} />
-              <span className="text-[10px] font-mono opacity-50 uppercase tracking-[0.2em]">{activeFlow?.status || 'offline'}</span>
+              <div className={`w-2.5 h-2.5 rounded-full ${cooldownSeconds > 0 ? 'bg-amber-500 animate-pulse' : activeFlow?.status === 'running' ? 'bg-green-500 animate-pulse' : 'bg-slate-500'}`} />
+              <span className="text-[10px] font-mono opacity-50 uppercase tracking-[0.2em]">
+                {cooldownSeconds > 0 ? 'cooling' : activeFlow?.status || 'idle'}
+              </span>
             </div>
-            <span className="text-xs font-bold tracking-tight truncate max-w-[250px] ml-4">{activeFlow?.name || 'Aether Control Center'}</span>
           </div>
 
           <div className="flex items-center gap-4">
             {activeFlow && (
-              <div className="flex items-center gap-2">
-                <button 
-                  onClick={toggleFlowExecution}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all active:scale-95 font-black uppercase tracking-widest text-[10px] ${activeFlow.status === 'running' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'}`}
-                >
-                  {activeFlow.status === 'running' ? <><Pause size={14} fill="currentColor" /> Pause Engine</> : <><Play size={14} fill="currentColor" /> Run Engine</>}
-                </button>
-                <button 
-                  onClick={downloadProjectReport}
-                  className="p-2.5 hover:bg-slate-800 rounded-xl text-slate-400 transition-all active:scale-90"
-                  title="Download Project Bundle"
-                >
-                  <Download size={20} />
-                </button>
-              </div>
+              <button 
+                onClick={toggleFlowExecution}
+                disabled={cooldownSeconds > 0}
+                className={`flex items-center gap-2 px-6 py-2 rounded-full transition-all active:scale-95 font-black uppercase tracking-widest text-[10px] ${cooldownSeconds > 0 ? 'bg-slate-800 text-slate-500 opacity-50' : activeFlow.status === 'running' ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'}`}
+              >
+                {activeFlow.status === 'running' ? <><Pause size={14} fill="currentColor" /> Stop Core</> : <><Play size={14} fill="currentColor" /> Boot Engine</>}
+              </button>
             )}
-            <button 
-              onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
-              className={`p-2.5 rounded-xl transition-colors ${theme === 'dark' ? 'hover:bg-slate-800' : 'hover:bg-slate-200'}`}
-            >
+            <button onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')} className={`p-2.5 rounded-xl transition-colors ${theme === 'dark' ? 'hover:bg-slate-800' : 'hover:bg-slate-200'}`}>
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
-            <button 
-              onClick={() => setShowDeployModal(true)}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-blue-500/20 active:scale-95"
-            >
-              + Mission
+            <button onClick={() => setShowDeployModal(true)} disabled={cooldownSeconds > 0} className={`bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-blue-500/20 active:scale-95 ${cooldownSeconds > 0 ? 'opacity-50 cursor-not-allowed' : ''}`}>
+              + New Mission
             </button>
           </div>
         </header>
@@ -284,48 +299,39 @@ const App: React.FC = () => {
             {activeFlow && activeView === 'flow' && <Dashboard flow={activeFlow} onTaskUpdate={updateTask} theme={theme} />}
             {activeFlow && activeView === 'dag' && <GraphVisualizer flow={activeFlow} theme={theme} />}
             {activeFlow && activeView === 'artifacts' && <ArtifactsView flow={activeFlow} theme={theme} />}
-            {activeView === 'agents' && <div className="flex-1 overflow-auto"><AgentConfig theme={theme} /></div>}
-            {activeView === 'mcp' && <div className="flex-1 overflow-auto"><MCPManager theme={theme} /></div>}
-            {activeView === 'settings' && <div className="flex-1 overflow-auto"><SettingsView theme={theme} /></div>}
-            
-            {!activeFlow && (activeView === 'flow' || activeView === 'dag' || activeView === 'artifacts') && (
-              <div className="h-full flex flex-col items-center justify-center text-center p-12 opacity-30">
-                <Box size={64} className="mb-6" />
-                <h2 className="text-xl font-black uppercase tracking-widest">No Active Mission</h2>
-                <p className="text-xs font-bold uppercase tracking-widest mt-2">Deploy a new mission to start orchestration</p>
-              </div>
-            )}
+            {activeView === 'agents' && <AgentConfig theme={theme} />}
+            {activeView === 'mcp' && <MCPManager theme={theme} />}
+            {activeView === 'settings' && <SettingsView theme={theme} />}
           </div>
         </div>
 
-        {/* Deploy Modal */}
         {showDeployModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md animate-in fade-in duration-300">
-            <div className={`w-full max-w-xl rounded-[2.5rem] border p-10 shadow-2xl ${theme === 'dark' ? 'bg-slate-900 border-white/10' : 'bg-white border-slate-200'}`}>
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/95 backdrop-blur-xl animate-in fade-in duration-500">
+            <div className={`w-full max-w-2xl rounded-[3rem] border p-12 shadow-2xl ${theme === 'dark' ? 'bg-slate-900 border-white/10' : 'bg-white border-slate-200'}`}>
               <div className="flex justify-between items-center mb-8">
-                <h3 className="text-xl font-black italic tracking-tighter uppercase flex items-center gap-4">
-                  <div className="p-3 bg-blue-600 rounded-2xl text-white shadow-xl shadow-blue-500/20">
-                    <Zap size={20} fill="currentColor" />
+                <h3 className="text-2xl font-black italic tracking-tighter uppercase flex items-center gap-5">
+                  <div className="p-4 bg-blue-600 rounded-2xl text-white shadow-2xl shadow-blue-500/30">
+                    <Zap size={24} fill="currentColor" />
                   </div>
-                  New Mission
+                  Initialize Topo
                 </h3>
-                <button onClick={() => setShowDeployModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors opacity-50 hover:opacity-100">
-                  <X size={24}/>
-                </button>
+                <button onClick={() => setShowDeployModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors opacity-30 hover:opacity-100"><X size={28}/></button>
               </div>
-              <div className="space-y-8">
-                <textarea 
-                  value={missionInput}
-                  onChange={(e) => setMissionInput(e.target.value)}
-                  placeholder="Describe your goal..."
-                  className={`w-full h-48 p-8 rounded-[2rem] border outline-none focus:ring-4 ring-blue-500/10 transition-all font-medium text-base resize-none leading-relaxed ${theme === 'dark' ? 'bg-black/40 border-white/5 text-slate-200' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
-                />
+              <div className="space-y-10">
+                <div className="space-y-4">
+                   <textarea 
+                    value={missionInput}
+                    onChange={(e) => setMissionInput(e.target.value)}
+                    placeholder="Brief your objective..."
+                    className={`w-full h-56 p-8 rounded-[2.5rem] border outline-none focus:ring-4 ring-blue-500/10 transition-all font-medium text-lg resize-none leading-relaxed ${theme === 'dark' ? 'bg-black/50 border-white/5 text-slate-200' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
+                  />
+                </div>
                 <button 
                   onClick={handleDeploy}
                   disabled={isPlanning || !missionInput.trim()}
-                  className={`w-full py-5 rounded-2xl flex items-center justify-center gap-4 font-black uppercase tracking-[0.25em] text-[10px] transition-all ${isPlanning ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-2xl shadow-blue-600/40 active:scale-[0.98]'}`}
+                  className={`w-full py-6 rounded-3xl flex items-center justify-center gap-4 font-black uppercase tracking-[0.3em] text-[11px] transition-all ${isPlanning ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-2xl shadow-blue-600/40 active:scale-[0.98]'}`}
                 >
-                  {isPlanning ? <><Loader2 className="animate-spin" size={18} /> Architecting...</> : <><Send size={16} /> Deploy to Nexus</>}
+                  {isPlanning ? <><Loader2 className="animate-spin" size={20} /> Architecting...</> : <><Send size={18} /> Deploy Mission</>}
                 </button>
               </div>
             </div>
