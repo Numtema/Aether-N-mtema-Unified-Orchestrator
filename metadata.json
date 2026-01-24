@@ -1,0 +1,8 @@
+{
+  "name": "Aether-Nümtema Unified Orchestrator",
+  "description": "A high-end AI orchestration platform merging Aether Nexus and Nümtema Studio, featuring MCP support and recursive task decomposition.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
