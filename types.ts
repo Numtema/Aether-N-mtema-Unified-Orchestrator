@@ -37,7 +37,7 @@ export interface Agent {
   };
 }
 
-export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'waiting_approval' | 'completed' | 'failed';
+export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'waiting_approval' | 'completed' | 'failed' | 'decomposing';
 
 export interface Task {
   id: string;
@@ -47,6 +47,7 @@ export interface Task {
   status: TaskStatus;
   assignedAgentId?: string;
   dependencies: string[];
+  parentTaskId?: string;
   inputData: any;
   outputData?: {
     result: string;

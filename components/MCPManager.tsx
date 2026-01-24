@@ -1,14 +1,59 @@
 
-import React, { useState } from 'react';
-import { Server, Terminal, Shield, Plus, RefreshCw, Lock, Link2, Github, Globe, ExternalLink, Zap, Code, Layout, MessageSquare, Info } from 'lucide-react';
-import { ThemeMode } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Server, Terminal, Shield, Plus, RefreshCw, Lock, Link2, Github, Globe, ExternalLink, Zap, Code, Layout, MessageSquare, Info, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { ThemeMode, MCPConfig } from '../types';
+import { StorageService } from '../services/storageService';
 
 const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
   const [githubUrl, setGithubUrl] = useState('');
   const [webUrl, setWebUrl] = useState('');
+  const [configs, setConfigs] = useState<MCPConfig[]>([]);
+
+  useEffect(() => {
+    const saved = StorageService.getMCPConfigs();
+    setConfigs(saved);
+  }, []);
+
+  const saveAndRefresh = (newConfigs: MCPConfig[]) => {
+    setConfigs(newConfigs);
+    StorageService.saveMCPConfigs(newConfigs);
+  };
 
   const gitMcpUrl = githubUrl ? githubUrl.replace('github.com', 'gitmcp.io').replace('github.io', 'gitmcp.io') : 'gitmcp.io/username/repo';
   const tomcpUrl = webUrl ? `tomcp.org/${webUrl.replace('https://', '').replace('http://', '')}` : 'tomcp.org/your-docs.com';
+
+  const registerServer = (type: 'gitmcp' | 'tomcp', url: string, name: string) => {
+    if (!url || url.includes('username/repo') || url.includes('your-docs.com')) return;
+    
+    const newConfig: MCPConfig = {
+      id: `mcp-${Date.now()}`,
+      name: name || `${type.toUpperCase()} Server`,
+      type: type as any,
+      url: url,
+      status: 'connected',
+      lastSync: new Date(),
+      capabilities: {
+        resources: true,
+        prompts: true,
+        tools: type === 'gitmcp',
+        logging: true
+      }
+    };
+
+    saveAndRefresh([...configs, newConfig]);
+    if (type === 'gitmcp') setGithubUrl('');
+    else setWebUrl('');
+  };
+
+  const removeServer = (id: string) => {
+    saveAndRefresh(configs.filter(c => c.id !== id));
+  };
+
+  const toggleStatus = (id: string) => {
+    saveAndRefresh(configs.map(c => 
+      c.id === id ? { ...c, status: c.status === 'connected' ? 'disconnected' : 'connected' } : c
+    ));
+  };
 
   return (
     <div className="h-full overflow-y-auto p-12 space-y-16 animate-in fade-in duration-700 custom-scrollbar">
@@ -66,7 +111,9 @@ const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-             <ToolAction icon={<Code size={16}/>} label="To MCP" theme={theme}/>
+             <button onClick={() => registerServer('gitmcp', gitMcpUrl, 'Github Codebase')} className={`flex items-center justify-center gap-3 py-4 rounded-2xl border font-black uppercase tracking-widest text-[10px] transition-all hover:scale-[1.02] active:scale-95 ${theme === 'dark' ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/20' : 'bg-blue-600 text-white shadow-lg'}`}>
+               <Plus size={16}/> Register Server
+             </button>
              <ToolAction icon={<MessageSquare size={16}/>} label="To Chat" theme={theme}/>
           </div>
         </div>
@@ -112,9 +159,87 @@ const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-             <ToolAction icon={<Layout size={16}/>} label="MCP Config" theme={theme}/>
+             <button onClick={() => registerServer('tomcp', tomcpUrl, 'Web Documentation')} className={`flex items-center justify-center gap-3 py-4 rounded-2xl border font-black uppercase tracking-widest text-[10px] transition-all hover:scale-[1.02] active:scale-95 ${theme === 'dark' ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-indigo-600 text-white shadow-lg'}`}>
+               <Plus size={16}/> Register Server
+             </button>
              <ToolAction icon={<Zap size={16}/>} label="Start Chat" theme={theme}/>
           </div>
+        </div>
+      </div>
+
+      {/* ACTIVE REGISTRY SECTION */}
+      <div className={`p-10 rounded-[3rem] border ${theme === 'dark' ? 'bg-slate-900 border-white/5 shadow-2xl' : 'bg-white border-slate-200 shadow-xl'}`}>
+        <div className="flex justify-between items-center mb-8">
+          <div>
+            <h3 className="text-2xl font-black italic tracking-tighter uppercase flex items-center gap-3">
+              <Shield className="text-emerald-500" size={24} /> Active MCP Registry
+            </h3>
+            <p className="text-[10px] opacity-50 font-bold uppercase tracking-widest mt-1">Live configuration layer for your AI agents</p>
+          </div>
+          <button onClick={() => setConfigs(StorageService.getMCPConfigs())} className={`p-3 rounded-xl border ${theme === 'dark' ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}>
+            <RefreshCw size={18} className="text-slate-500" />
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="border-b border-white/10">
+                <th className="pb-4 text-[9px] font-black uppercase tracking-[0.2em] opacity-40">Server Instance</th>
+                <th className="pb-4 text-[9px] font-black uppercase tracking-[0.2em] opacity-40">Transport / Type</th>
+                <th className="pb-4 text-[9px] font-black uppercase tracking-[0.2em] opacity-40">Status</th>
+                <th className="pb-4 text-[9px] font-black uppercase tracking-[0.2em] opacity-40 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {configs.length > 0 ? configs.map(config => (
+                <tr key={config.id} className="border-b border-white/5 group hover:bg-white/[0.02] transition-colors">
+                  <td className="py-6">
+                    <div className="flex flex-col">
+                      <span className="text-sm font-bold tracking-tight">{config.name}</span>
+                      <span className="text-[10px] font-mono opacity-40 truncate max-w-[300px]">{config.url}</span>
+                    </div>
+                  </td>
+                  <td className="py-6">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-1.5 rounded-md ${theme === 'dark' ? 'bg-white/5' : 'bg-slate-100'}`}>
+                        {config.type === 'gitmcp' ? <Github size={12} className="text-slate-400" /> : <Globe size={12} className="text-slate-400" />}
+                      </div>
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-60">{config.type}</span>
+                    </div>
+                  </td>
+                  <td className="py-6">
+                    <button 
+                      onClick={() => toggleStatus(config.id)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest border transition-all ${config.status === 'connected' ? 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' : 'text-slate-500 bg-slate-500/5 border-slate-500/10 opacity-50'}`}
+                    >
+                      <div className={`w-1.5 h-1.5 rounded-full ${config.status === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'}`} />
+                      {config.status}
+                    </button>
+                  </td>
+                  <td className="py-6 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      <button className="p-2 text-slate-500 hover:text-blue-500 transition-colors">
+                        <ExternalLink size={16} />
+                      </button>
+                      <button onClick={() => removeServer(config.id)} className="p-2 text-slate-500 hover:text-red-500 transition-colors">
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={4} className="py-12 text-center opacity-20">
+                    <div className="flex flex-col items-center gap-2">
+                      <Server size={32} />
+                      <span className="text-[10px] font-black uppercase tracking-widest">No active servers registered in the registry</span>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 

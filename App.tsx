@@ -103,12 +103,8 @@ const App: React.FC = () => {
   const toggleFlowExecution = () => {
     if (!activeFlow) return;
     const newStatus = activeFlow.status === 'running' ? 'paused' : 'running';
-    
-    // Forcer la mise à jour immédiate pour l'orchestrateur
     flowStatusRef.current = newStatus;
-    
     setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: newStatus } : f));
-    
     if (newStatus === 'running') {
       console.log("[Engine] Starting Orchestrator for:", activeFlow.name);
       runOrchestrator();
@@ -117,13 +113,8 @@ const App: React.FC = () => {
 
   const runOrchestrator = async () => {
     const executeNext = async () => {
-      // On vérifie le ref pour savoir si on doit continuer ou s'arrêter
-      if (flowStatusRef.current !== 'running') {
-        console.log("[Engine] Stopped or Paused.");
-        return;
-      }
+      if (flowStatusRef.current !== 'running') return;
 
-      // Utiliser flowsRef pour avoir les données les plus fraîches sans attendre le render cycle
       const currentFlow = flowsRef.current[activeFlowIndex];
       if (!currentFlow) return;
 
@@ -137,19 +128,56 @@ const App: React.FC = () => {
       if (executableTasks.length === 0) {
         const allDone = currentFlow.tasks.length > 0 && currentFlow.tasks.every(t => t.status === 'completed' || t.status === 'failed');
         if (allDone) {
-          console.log("[Engine] Flow Completed.");
           setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: 'completed' } : f));
           return;
         }
-        // Attendre que des dépendances se libèrent ou que l'utilisateur ajoute des tâches
         setTimeout(executeNext, 2000);
         return;
       }
 
-      // Exécuter la première tâche disponible
       const task = executableTasks[0];
-      updateTask(task.id, { status: 'in_progress' });
       
+      // Step 1: Decomposition Check (Recursive logic)
+      if (task.status === 'todo') {
+        updateTask(task.id, { status: 'decomposing' });
+        try {
+          const decomposition = await gemini.current.decomposeTask(task, "Current project graph analysis.");
+          if (decomposition.shouldDecompose && decomposition.subtasks) {
+            console.log(`[Engine] Decomposing task: ${task.title} into ${decomposition.subtasks.length} sub-tasks.`);
+            
+            const subtasks: Task[] = decomposition.subtasks.map((st: any) => ({
+              id: `${task.id}.${st.id}`,
+              flowId: task.flowId,
+              parentTaskId: task.id,
+              title: st.title,
+              description: st.description,
+              assignedAgentId: st.agentRole,
+              status: 'todo',
+              dependencies: [...task.dependencies], // Sub-tasks inherit parent's dependencies
+              inputData: {},
+              requiresApproval: false
+            }));
+
+            setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
+              ...f,
+              tasks: [
+                ...f.tasks.map(t => t.id === task.id ? { ...t, status: 'todo', dependencies: [...t.dependencies, ...subtasks.map(s => s.id)] } : t),
+                ...subtasks
+              ]
+            } : f));
+            
+            setTimeout(executeNext, 500);
+            return;
+          } else {
+            updateTask(task.id, { status: 'in_progress' });
+          }
+        } catch (e) {
+          console.error("Decomposition failed, proceeding with original task", e);
+          updateTask(task.id, { status: 'in_progress' });
+        }
+      }
+
+      // Step 2: Normal Execution
       try {
         const agents = StorageService.getAgents();
         const mockAgent = agents.find(a => a.role === task.assignedAgentId) || agents[0];
@@ -170,7 +198,6 @@ const App: React.FC = () => {
         updateTask(task.id, { status: 'failed', error: err.message });
       }
       
-      // Continuer la boucle
       if (flowStatusRef.current === 'running') {
         setTimeout(executeNext, 1000);
       }
