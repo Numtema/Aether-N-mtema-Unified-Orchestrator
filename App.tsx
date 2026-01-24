@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Zap, Activity, Share2, Users, Terminal, Settings, 
   Sun, Moon, Layout, Play, Pause, Plus, RefreshCw, 
-  ChevronRight, Shield, Server, Box, Cpu, Send, Loader2, X, Download, FileText
+  ChevronRight, Shield, Server, Box, Cpu, Send, Loader2, X, Download, FileText, Menu, ChevronLeft
 } from 'lucide-react';
 import { ViewMode, ThemeMode, Flow, Task, Agent, MCPConfig } from './types';
 import Sidebar from './components/Sidebar';
@@ -24,17 +24,19 @@ const App: React.FC = () => {
   const [isPlanning, setIsPlanning] = useState(false);
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [missionInput, setMissionInput] = useState('');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   
   const gemini = useRef(new GeminiService());
   const activeFlow = flows[activeFlowIndex];
   const flowStatusRef = useRef<string>('idle');
+  const flowsRef = useRef<Flow[]>([]);
 
   useEffect(() => {
     const savedFlows = StorageService.getFlows();
     if (savedFlows.length > 0) {
       setFlows(savedFlows);
+      flowsRef.current = savedFlows;
     } else {
-      // Create initial demo project if empty
       const demoFlow: Flow = {
         id: 'demo-1',
         name: 'Nexus Alpha Initialization',
@@ -44,11 +46,15 @@ const App: React.FC = () => {
         workflowGraph: { nodes: [], edges: [] }
       };
       setFlows([demoFlow]);
+      flowsRef.current = [demoFlow];
     }
   }, []);
 
   useEffect(() => {
-    if (flows.length > 0) StorageService.saveFlows(flows);
+    if (flows.length > 0) {
+      StorageService.saveFlows(flows);
+      flowsRef.current = flows;
+    }
     if (activeFlow) flowStatusRef.current = activeFlow.status;
   }, [flows, activeFlow]);
 
@@ -97,17 +103,30 @@ const App: React.FC = () => {
   const toggleFlowExecution = () => {
     if (!activeFlow) return;
     const newStatus = activeFlow.status === 'running' ? 'paused' : 'running';
+    
+    // Forcer la mise à jour immédiate pour l'orchestrateur
+    flowStatusRef.current = newStatus;
+    
     setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: newStatus } : f));
-    if (newStatus === 'running') runOrchestrator();
+    
+    if (newStatus === 'running') {
+      console.log("[Engine] Starting Orchestrator for:", activeFlow.name);
+      runOrchestrator();
+    }
   };
 
   const runOrchestrator = async () => {
     const executeNext = async () => {
-      if (flowStatusRef.current !== 'running') return;
+      // On vérifie le ref pour savoir si on doit continuer ou s'arrêter
+      if (flowStatusRef.current !== 'running') {
+        console.log("[Engine] Stopped or Paused.");
+        return;
+      }
 
-      const currentFlows = StorageService.getFlows();
-      const currentFlow = currentFlows[activeFlowIndex];
-      
+      // Utiliser flowsRef pour avoir les données les plus fraîches sans attendre le render cycle
+      const currentFlow = flowsRef.current[activeFlowIndex];
+      if (!currentFlow) return;
+
       const executableTasks = currentFlow.tasks.filter(t => 
         t.status === 'todo' && 
         t.dependencies.every(depId => 
@@ -116,33 +135,45 @@ const App: React.FC = () => {
       );
 
       if (executableTasks.length === 0) {
-        const allDone = currentFlow.tasks.every(t => t.status === 'completed' || t.status === 'failed');
+        const allDone = currentFlow.tasks.length > 0 && currentFlow.tasks.every(t => t.status === 'completed' || t.status === 'failed');
         if (allDone) {
+          console.log("[Engine] Flow Completed.");
           setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: 'completed' } : f));
           return;
         }
+        // Attendre que des dépendances se libèrent ou que l'utilisateur ajoute des tâches
+        setTimeout(executeNext, 2000);
         return;
       }
 
-      for (const task of executableTasks) {
-        if (flowStatusRef.current !== 'running') break;
-        updateTask(task.id, { status: 'in_progress' });
+      // Exécuter la première tâche disponible
+      const task = executableTasks[0];
+      updateTask(task.id, { status: 'in_progress' });
+      
+      try {
+        const agents = StorageService.getAgents();
+        const mockAgent = agents.find(a => a.role === task.assignedAgentId) || agents[0];
         
-        try {
-          const agents = StorageService.getAgents();
-          const mockAgent = agents[0];
-          const result = await gemini.current.executeTask(task, mockAgent, "Context pipeline data.");
-          
-          updateTask(task.id, { 
-            status: 'completed', 
-            outputData: { result, timestamp: Date.now(), artifactType: 'markdown' } 
-          });
-        } catch (err: any) {
-          updateTask(task.id, { status: 'failed', error: err.message });
-        }
+        console.log(`[Engine] Executing: ${task.title} with agent ${mockAgent.name}`);
+        const result = await gemini.current.executeTask(task, mockAgent, "Pipeline data context placeholder.");
+        
+        updateTask(task.id, { 
+          status: 'completed', 
+          outputData: { 
+            result, 
+            timestamp: Date.now(), 
+            artifactType: result.includes('```') ? 'code' : 'markdown' 
+          } 
+        });
+      } catch (err: any) {
+        console.error(`[Engine] Task Failed: ${task.title}`, err);
+        updateTask(task.id, { status: 'failed', error: err.message });
       }
       
-      if (flowStatusRef.current === 'running') setTimeout(executeNext, 1500);
+      // Continuer la boucle
+      if (flowStatusRef.current === 'running') {
+        setTimeout(executeNext, 1000);
+      }
     };
 
     executeNext();
@@ -154,7 +185,7 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${activeFlow.name}_Full_Report.json`;
+    a.download = `${activeFlow.name.replace(/\s+/g, '_')}_Report.json`;
     a.click();
   };
 
@@ -167,17 +198,25 @@ const App: React.FC = () => {
         flows={flows}
         activeFlowIndex={activeFlowIndex}
         setActiveFlowIndex={setActiveFlowIndex}
+        isCollapsed={isSidebarCollapsed}
+        setIsCollapsed={setIsSidebarCollapsed}
       />
 
       <main className="flex-1 flex flex-col min-w-0 relative">
         <header className={`h-16 shrink-0 border-b flex items-center justify-between px-8 z-20 ${theme === 'dark' ? 'bg-slate-950/50 border-white/10' : 'bg-white/50 border-black/5'} backdrop-blur-md`}>
           <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+              className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-all active:scale-90"
+            >
+              {isSidebarCollapsed ? <Menu size={20} /> : <ChevronLeft size={20} />}
+            </button>
+            <div className="h-4 w-px bg-slate-700/50 mx-2" />
             <div className="flex items-center gap-2">
               <div className={`w-2.5 h-2.5 rounded-full ${activeFlow?.status === 'running' ? 'bg-green-500 animate-pulse' : activeFlow?.status === 'paused' ? 'bg-amber-500' : 'bg-slate-500'}`} />
               <span className="text-[10px] font-mono opacity-50 uppercase tracking-[0.2em]">{activeFlow?.status || 'offline'}</span>
             </div>
-            <div className="h-4 w-px bg-slate-700/50 mx-2" />
-            <span className="text-xs font-bold tracking-tight truncate max-w-[200px]">{activeFlow?.name || 'Aether Control Center'}</span>
+            <span className="text-xs font-bold tracking-tight truncate max-w-[250px] ml-4">{activeFlow?.name || 'Aether Control Center'}</span>
           </div>
 
           <div className="flex items-center gap-4">
@@ -185,10 +224,9 @@ const App: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button 
                   onClick={toggleFlowExecution}
-                  className={`p-2.5 rounded-xl transition-all active:scale-90 ${activeFlow.status === 'running' ? 'text-amber-500 hover:bg-amber-500/10' : 'text-emerald-500 hover:bg-emerald-500/10'}`}
-                  title={activeFlow.status === 'running' ? 'Pause Execution' : 'Resume Execution'}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all active:scale-95 font-black uppercase tracking-widest text-[10px] ${activeFlow.status === 'running' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'}`}
                 >
-                  {activeFlow.status === 'running' ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
+                  {activeFlow.status === 'running' ? <><Pause size={14} fill="currentColor" /> Pause Engine</> : <><Play size={14} fill="currentColor" /> Run Engine</>}
                 </button>
                 <button 
                   onClick={downloadProjectReport}
@@ -209,7 +247,7 @@ const App: React.FC = () => {
               onClick={() => setShowDeployModal(true)}
               className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-blue-500/20 active:scale-95"
             >
-              Deploy Project
+              + Mission
             </button>
           </div>
         </header>
