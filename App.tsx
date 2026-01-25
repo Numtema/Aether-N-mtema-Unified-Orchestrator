@@ -5,7 +5,7 @@ import {
   Sun, Moon, Layout, Play, Pause, Plus, RefreshCw, 
   ChevronRight, Shield, Server, Box, Cpu, Send, Loader2, X, Download, FileText, Menu, ChevronLeft, AlertTriangle, Info, Clock
 } from 'lucide-react';
-import { ViewMode, ThemeMode, Flow, Task, Agent, MCPConfig, TaskStatus } from './types';
+import { ViewMode, ThemeMode, Flow, Task, Agent, MCPConfig, TaskStatus, MorsselTelemetry } from './types';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import GraphVisualizer from './components/GraphVisualizer';
@@ -33,7 +33,6 @@ const App: React.FC = () => {
   const flowStatusRef = useRef<string>('idle');
   const flowsRef = useRef<Flow[]>([]);
 
-  // Sync flows reference for the orchestrator
   useEffect(() => {
     flowsRef.current = flows;
   }, [flows]);
@@ -45,10 +44,12 @@ const App: React.FC = () => {
     } else {
       const demoFlow: Flow = {
         id: 'demo-1',
-        name: 'Nexus Alpha Initialization',
+        name: 'Morssel Alpha Init',
         teamId: 'team-1',
         status: 'idle',
         tasks: [],
+        contextMemory: {},
+        telemetry: { avgReasoningDepth: 0, totalTokensEstimate: 0, contextLoad: 0, memoryBankSize: 0, prunedTasksCount: 0 },
         workflowGraph: { nodes: [], edges: [] }
       };
       setFlows([demoFlow]);
@@ -56,13 +57,10 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (flows.length > 0) {
-      StorageService.saveFlows(flows);
-    }
+    if (flows.length > 0) StorageService.saveFlows(flows);
     if (activeFlow) flowStatusRef.current = activeFlow.status;
   }, [flows, activeFlow]);
 
-  // Cooldown timer
   useEffect(() => {
     if (cooldownSeconds > 0) {
       const timer = setInterval(() => setCooldownSeconds(s => s - 1), 1000);
@@ -71,6 +69,126 @@ const App: React.FC = () => {
       setSystemMessage(null);
     }
   }, [cooldownSeconds]);
+
+  const updateTask = (taskId: string, updates: Partial<Task>) => {
+    setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
+      ...f,
+      tasks: f.tasks.map(t => t.id === taskId ? { ...t, ...updates } : t)
+    } : f));
+  };
+
+  const updateTelemetry = (updates: Partial<MorsselTelemetry>) => {
+    setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
+      ...f,
+      telemetry: { ...f.telemetry, ...updates }
+    } : f));
+  };
+
+  const updateMemory = (key: string, value: string) => {
+    setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
+      ...f,
+      contextMemory: { ...f.contextMemory, [key]: value }
+    } : f));
+  };
+
+  const runOrchestrator = async () => {
+    const executeNext = async () => {
+      if (flowStatusRef.current !== 'running' || cooldownSeconds > 0) return;
+
+      const currentFlow = flowsRef.current[activeFlowIndex];
+      if (!currentFlow) return;
+
+      const executableTasks = currentFlow.tasks.filter(t => 
+        t.status === 'todo' && 
+        t.dependencies.every(depId => 
+          currentFlow.tasks.find(pt => pt.id === depId)?.status === 'completed' ||
+          currentFlow.tasks.find(pt => pt.id === depId)?.status === 'pruned'
+        )
+      );
+
+      if (executableTasks.length === 0) {
+        const allDone = currentFlow.tasks.length > 0 && currentFlow.tasks.every(t => ['completed', 'failed', 'pruned'].includes(t.status));
+        if (allDone) {
+          setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: 'completed' } : f));
+          return;
+        }
+        setTimeout(executeNext, 10000);
+        return;
+      }
+
+      const task = executableTasks[0];
+      const memoryString = JSON.stringify(currentFlow.contextMemory);
+      
+      try {
+        updateTask(task.id, { status: 'decomposing' });
+        const judgment = await gemini.current.judgeTask(task, memoryString);
+
+        if (judgment.decision === 'prune') {
+          updateTask(task.id, { status: 'pruned' });
+          updateTelemetry({ prunedTasksCount: currentFlow.telemetry.prunedTasksCount + 1 });
+        } 
+        else if (judgment.decision === 'decompose') {
+          const decomposition = await gemini.current.decomposeTask(task, memoryString);
+          const nextDepth = (task.depth || 0) + 1;
+          
+          const subtasks: Task[] = decomposition.subtasks.map((st: any) => ({
+            id: `${task.id}.${st.id}`,
+            flowId: task.flowId,
+            parentTaskId: task.id,
+            depth: nextDepth,
+            title: st.title,
+            description: st.description,
+            assignedAgentId: st.agentRole,
+            status: 'todo' as TaskStatus,
+            dependencies: [...task.dependencies],
+            inputData: {},
+            requiresApproval: false
+          }));
+
+          setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
+            ...f,
+            tasks: [
+              ...f.tasks.map(t => t.id === task.id ? { ...t, status: 'completed' as TaskStatus, outputData: { result: `Fractal Decomposition Level ${nextDepth} launched.`, timestamp: Date.now() } } : t),
+              ...subtasks
+            ] as Task[]
+          } : f));
+          updateTelemetry({ avgReasoningDepth: Math.max(currentFlow.telemetry.avgReasoningDepth, nextDepth) });
+        } 
+        else {
+          updateTask(task.id, { status: 'in_progress' });
+          const agents = StorageService.getAgents();
+          const agent = agents.find(a => a.role === task.assignedAgentId) || agents[0];
+          const result = await gemini.current.executeTask(task, agent, memoryString);
+          
+          updateTask(task.id, { 
+            status: 'completed', 
+            outputData: { result, timestamp: Date.now(), artifactType: result.includes('```') ? 'code' : 'markdown' } 
+          });
+          updateMemory(task.id, result.substring(0, 1000));
+          updateTelemetry({ 
+            totalTokensEstimate: currentFlow.telemetry.totalTokensEstimate + (result.length / 4),
+            memoryBankSize: Object.keys(currentFlow.contextMemory).length + 1
+          });
+        }
+
+      } catch (err: any) {
+        if (err.message === "QUOTA_EXHAUSTED") {
+          setCooldownSeconds(60);
+          setSystemMessage({ text: "Quota reached. Morssel paused for cooling.", type: 'warning' });
+          updateTask(task.id, { status: 'todo' });
+          toggleFlowExecution();
+          return;
+        }
+        updateTask(task.id, { status: 'failed', error: err.message });
+      }
+      
+      if (flowStatusRef.current === 'running') {
+        setTimeout(executeNext, 8000);
+      }
+    };
+
+    executeNext();
+  };
 
   const handleDeploy = async () => {
     if (!missionInput.trim() || cooldownSeconds > 0) return;
@@ -87,9 +205,12 @@ const App: React.FC = () => {
           ...t,
           flowId: `flow-${Date.now()}`,
           status: 'todo' as TaskStatus,
+          depth: 0,
           inputData: {},
           requiresApproval: t.requiresApproval || false
         })),
+        contextMemory: {},
+        telemetry: { avgReasoningDepth: 0, totalTokensEstimate: 0, contextLoad: 0, memoryBankSize: 0, prunedTasksCount: 0 },
         workflowGraph: {
           nodes: plan.tasks.map((t: any) => t.id),
           edges: plan.tasks.flatMap((t: any) => 
@@ -104,20 +225,13 @@ const App: React.FC = () => {
     } catch (error: any) {
       if (error.message === "QUOTA_EXHAUSTED") {
         setCooldownSeconds(60);
-        setSystemMessage({ text: "API rate limit reached. System cooling down...", type: 'warning' });
+        setSystemMessage({ text: "Rate limit reached during planning.", type: 'warning' });
       } else {
         setSystemMessage({ text: error.message || "Failed to architect mission.", type: 'error' });
       }
     } finally {
       setIsPlanning(false);
     }
-  };
-
-  const updateTask = (taskId: string, updates: Partial<Task>) => {
-    setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
-      ...f,
-      tasks: f.tasks.map(t => t.id === taskId ? { ...t, ...updates } : t)
-    } : f));
   };
 
   const toggleFlowExecution = () => {
@@ -129,98 +243,6 @@ const App: React.FC = () => {
       setSystemMessage(null);
       runOrchestrator();
     }
-  };
-
-  const runOrchestrator = async () => {
-    const executeNext = async () => {
-      if (flowStatusRef.current !== 'running' || cooldownSeconds > 0) return;
-
-      const currentFlow = flowsRef.current[activeFlowIndex];
-      if (!currentFlow) return;
-
-      const executableTasks = currentFlow.tasks.filter(t => 
-        t.status === 'todo' && 
-        t.dependencies.every(depId => 
-          currentFlow.tasks.find(pt => pt.id === depId)?.status === 'completed'
-        )
-      );
-
-      if (executableTasks.length === 0) {
-        const allDone = currentFlow.tasks.length > 0 && currentFlow.tasks.every(t => t.status === 'completed' || t.status === 'failed');
-        if (allDone) {
-          setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? { ...f, status: 'completed' } : f));
-          return;
-        }
-        setTimeout(executeNext, 8000); // Poll slowly
-        return;
-      }
-
-      // Process only one task at a time to stay within quota
-      const task = executableTasks[0];
-      
-      try {
-        if (task.status === 'todo') {
-          updateTask(task.id, { status: 'decomposing' });
-          const decomposition = await gemini.current.decomposeTask(task, "Recursive context.");
-          
-          if (decomposition.shouldDecompose && decomposition.subtasks) {
-            const subtasks: Task[] = decomposition.subtasks.map((st: any) => ({
-              id: `${task.id}.${st.id}`,
-              flowId: task.flowId,
-              parentTaskId: task.id,
-              title: st.title,
-              description: st.description,
-              assignedAgentId: st.agentRole,
-              status: 'todo' as TaskStatus,
-              dependencies: [...task.dependencies],
-              inputData: {},
-              requiresApproval: false
-            }));
-
-            setFlows(prev => prev.map((f, i) => i === activeFlowIndex ? {
-              ...f,
-              tasks: [
-                ...f.tasks.map(t => t.id === task.id ? { ...t, status: 'todo' as TaskStatus, dependencies: [...t.dependencies, ...subtasks.map(s => s.id)] } : t),
-                ...subtasks
-              ] as Task[]
-            } : f));
-            
-            setTimeout(executeNext, 12000); // Significant pause after decomposition
-            return;
-          } else {
-            updateTask(task.id, { status: 'in_progress' });
-          }
-        }
-
-        const agents = StorageService.getAgents();
-        const mockAgent = agents.find(a => a.role === task.assignedAgentId) || agents[0];
-        const result = await gemini.current.executeTask(task, mockAgent, "Task execution phase.");
-        
-        updateTask(task.id, { 
-          status: 'completed', 
-          outputData: { 
-            result, 
-            timestamp: Date.now(), 
-            artifactType: result.includes('```') ? 'code' : 'markdown' 
-          } 
-        });
-
-      } catch (err: any) {
-        if (err.message === "QUOTA_EXHAUSTED") {
-          setCooldownSeconds(60);
-          setSystemMessage({ text: "Quota exceeded. Engine paused for cooling.", type: 'warning' });
-          toggleFlowExecution();
-          return;
-        }
-        updateTask(task.id, { status: 'failed', error: err.message });
-      }
-      
-      if (flowStatusRef.current === 'running') {
-        setTimeout(executeNext, 10000); // Throttling
-      }
-    };
-
-    executeNext();
   };
 
   return (
@@ -237,7 +259,6 @@ const App: React.FC = () => {
       />
 
       <main className="flex-1 flex flex-col min-w-0 relative">
-        {/* System Message HUD */}
         {(systemMessage || cooldownSeconds > 0) && (
           <div className="absolute top-20 left-1/2 -translate-x-1/2 z-[60] w-[90%] max-w-2xl animate-in slide-in-from-top-4 duration-500">
              <div className={`glass p-4 rounded-2xl border flex items-center justify-between gap-6 shadow-2xl ${systemMessage?.type === 'error' ? 'border-red-500/50 shadow-red-500/10' : 'border-amber-500/50 shadow-amber-500/10'}`}>
@@ -247,7 +268,7 @@ const App: React.FC = () => {
                    </div>
                    <div className="space-y-0.5">
                       <p className={`text-[10px] font-black uppercase tracking-widest ${systemMessage?.type === 'error' ? 'text-red-500' : 'text-amber-500'}`}>
-                        {systemMessage?.type === 'error' ? 'System Error' : 'Engine Cooldown'}
+                        {systemMessage?.type === 'error' ? 'Morssel Critical' : 'Engine Cooldown'}
                       </p>
                       <p className="text-[11px] font-bold opacity-80">
                         {systemMessage?.text} {cooldownSeconds > 0 ? `(${cooldownSeconds}s left)` : ''}
@@ -282,7 +303,7 @@ const App: React.FC = () => {
                 disabled={cooldownSeconds > 0}
                 className={`flex items-center gap-2 px-6 py-2 rounded-full transition-all active:scale-95 font-black uppercase tracking-widest text-[10px] ${cooldownSeconds > 0 ? 'bg-slate-800 text-slate-500 opacity-50' : activeFlow.status === 'running' ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'}`}
               >
-                {activeFlow.status === 'running' ? <><Pause size={14} fill="currentColor" /> Stop Core</> : <><Play size={14} fill="currentColor" /> Boot Engine</>}
+                {activeFlow.status === 'running' ? <><Pause size={14} fill="currentColor" /> Stop Core</> : <><Play size={14} fill="currentColor" /> Boot Morssel</>}
               </button>
             )}
             <button onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')} className={`p-2.5 rounded-xl transition-colors ${theme === 'dark' ? 'hover:bg-slate-800' : 'hover:bg-slate-200'}`}>
@@ -313,7 +334,7 @@ const App: React.FC = () => {
                   <div className="p-4 bg-blue-600 rounded-2xl text-white shadow-2xl shadow-blue-500/30">
                     <Zap size={24} fill="currentColor" />
                   </div>
-                  Initialize Topo
+                  Morssel v2.2 Architect
                 </h3>
                 <button onClick={() => setShowDeployModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors opacity-30 hover:opacity-100"><X size={28}/></button>
               </div>
@@ -322,7 +343,7 @@ const App: React.FC = () => {
                    <textarea 
                     value={missionInput}
                     onChange={(e) => setMissionInput(e.target.value)}
-                    placeholder="Brief your objective..."
+                    placeholder="Brief your fractal objective..."
                     className={`w-full h-56 p-8 rounded-[2.5rem] border outline-none focus:ring-4 ring-blue-500/10 transition-all font-medium text-lg resize-none leading-relaxed ${theme === 'dark' ? 'bg-black/50 border-white/5 text-slate-200' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
                   />
                 </div>
@@ -331,7 +352,7 @@ const App: React.FC = () => {
                   disabled={isPlanning || !missionInput.trim()}
                   className={`w-full py-6 rounded-3xl flex items-center justify-center gap-4 font-black uppercase tracking-[0.3em] text-[11px] transition-all ${isPlanning ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-2xl shadow-blue-600/40 active:scale-[0.98]'}`}
                 >
-                  {isPlanning ? <><Loader2 className="animate-spin" size={20} /> Architecting...</> : <><Send size={18} /> Deploy Mission</>}
+                  {isPlanning ? <><Loader2 className="animate-spin" size={20} /> Deploying Topology...</> : <><Send size={18} /> Launch Orchestrator</>}
                 </button>
               </div>
             </div>

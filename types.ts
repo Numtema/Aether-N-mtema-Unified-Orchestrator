@@ -37,7 +37,7 @@ export interface Agent {
   };
 }
 
-export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'waiting_approval' | 'completed' | 'failed' | 'decomposing';
+export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'waiting_approval' | 'completed' | 'failed' | 'decomposing' | 'pruned';
 
 export interface Task {
   id: string;
@@ -48,6 +48,7 @@ export interface Task {
   assignedAgentId?: string;
   dependencies: string[];
   parentTaskId?: string;
+  depth?: number;
   inputData: any;
   outputData?: {
     result: string;
@@ -58,12 +59,22 @@ export interface Task {
   error?: string;
 }
 
+export interface MorsselTelemetry {
+  avgReasoningDepth: number;
+  totalTokensEstimate: number;
+  contextLoad: number;
+  memoryBankSize: number;
+  prunedTasksCount: number; // New: tracking efficiency
+}
+
 export interface Flow {
   id: string;
   name: string;
   teamId: string;
   status: 'idle' | 'running' | 'paused' | 'completed' | 'failed';
   tasks: Task[];
+  contextMemory: Record<string, string>;
+  telemetry: MorsselTelemetry;
   workflowGraph: {
     nodes: string[];
     edges: { source: string; target: string; condition?: string }[];
