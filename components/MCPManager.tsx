@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react';
 import { Server, Terminal, Shield, Plus, RefreshCw, Lock, Link2, Github, Globe, ExternalLink, Zap, Code, Layout, MessageSquare, Info, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { ThemeMode, MCPConfig } from '../types';
 import { StorageService } from '../services/storageService';
+// Added auth import to access current user UID
+import { auth } from '../services/firebase';
 
 const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
   const [githubUrl, setGithubUrl] = useState('');
@@ -10,13 +12,24 @@ const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
   const [configs, setConfigs] = useState<MCPConfig[]>([]);
 
   useEffect(() => {
-    const saved = StorageService.getMCPConfigs();
-    setConfigs(saved);
+    // Fixed: Added async wrapper and passed current user UID to getMCPConfigs
+    const loadConfigs = async () => {
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        const saved = await StorageService.getMCPConfigs(uid);
+        setConfigs(saved);
+      }
+    };
+    loadConfigs();
   }, []);
 
+  // Fixed: Passed current user UID to saveMCPConfigs
   const saveAndRefresh = (newConfigs: MCPConfig[]) => {
-    setConfigs(newConfigs);
-    StorageService.saveMCPConfigs(newConfigs);
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      setConfigs(newConfigs);
+      StorageService.saveMCPConfigs(uid, newConfigs);
+    }
   };
 
   const gitMcpUrl = githubUrl ? githubUrl.replace('github.com', 'gitmcp.io').replace('github.io', 'gitmcp.io') : 'gitmcp.io/username/repo';
@@ -25,8 +38,13 @@ const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
   const registerServer = (type: 'gitmcp' | 'tomcp', url: string, name: string) => {
     if (!url || url.includes('username/repo') || url.includes('your-docs.com')) return;
     
+    // Fixed: Added ownerId to newConfig object from current user UID
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+
     const newConfig: MCPConfig = {
       id: `mcp-${Date.now()}`,
+      ownerId: uid,
       name: name || `${type.toUpperCase()} Server`,
       type: type as any,
       url: url,
@@ -176,7 +194,14 @@ const MCPManager: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
             </h3>
             <p className="text-[10px] opacity-50 font-bold uppercase tracking-widest mt-1">Live configuration layer for your AI agents</p>
           </div>
-          <button onClick={() => setConfigs(StorageService.getMCPConfigs())} className={`p-3 rounded-xl border ${theme === 'dark' ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}>
+          {/* Fixed: Wrapped async StorageService.getMCPConfigs call with uid and await */}
+          <button onClick={async () => {
+            const uid = auth.currentUser?.uid;
+            if (uid) {
+              const fresh = await StorageService.getMCPConfigs(uid);
+              setConfigs(fresh);
+            }
+          }} className={`p-3 rounded-xl border ${theme === 'dark' ? 'bg-white/5 border-white/10 hover:bg-white/10' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}>
             <RefreshCw size={18} className="text-slate-500" />
           </button>
         </div>

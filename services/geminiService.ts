@@ -1,13 +1,14 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { Task, Agent } from "../types";
 
 export class GeminiService {
-  private ai: GoogleGenAI;
-  private readonly MAX_DEPTH = 3; // Limite de sécurité Morssel
+  private readonly MAX_DEPTH = 3;
 
-  constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  constructor() {}
+
+  // Create a new client instance per call to ensure up-to-date API key usage
+  private getClient(): GoogleGenAI {
+    return new GoogleGenAI({ apiKey: process.env.API_KEY as string });
   }
 
   private isQuotaError(error: any): boolean {
@@ -24,7 +25,7 @@ export class GeminiService {
     } catch (error: any) {
       if (this.isQuotaError(error)) {
         if (retries > 0) {
-          console.warn(`[Morssel v2.2] Rate limit. Cooling for ${delay/1000}s...`);
+          console.warn(`[Morssel v2.6] Rate limit cooling...`);
           await new Promise(r => setTimeout(r, delay));
           return this.callWithRetry(fn, retries - 1, delay * 2);
         }
@@ -34,15 +35,90 @@ export class GeminiService {
     }
   }
 
-  async planWorkflow(goal: string): Promise<{ projectName: string, tasks: any[] }> {
+  // Utility to clean Markdown JSON blocks from AI output
+  private cleanJson(text: string): string {
+    return text.replace(/```json/g, '').replace(/```/g, '').trim();
+  }
+
+  /**
+   * RECURSIVE INTEGRITY GUARD: Schema Sentinel
+   * Bronze -> Silver transition
+   */
+  async validateIntegrity(task: Task, siblingTasks: Task[]): Promise<{ isValid: boolean, error?: string, recommendations: string[], pitfalls: string[], urls: {title: string, uri: string}[] }> {
     return this.callWithRetry(async () => {
-      const response = await this.ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Architect a recursive mission for: "${goal}"`,
+      const ai = this.getClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-pro-preview',
+        contents: `INTEGRITY AUDIT [${task.hierarchyPath}]: Analyze task "${task.title}". 
+Siblings: ${siblingTasks.map(t => t.title).join(', ')}`,
         config: {
-          systemInstruction: `You are the Aether Meta-Architect. 
-Decompose goals into a DAG. Initial tasks are Level 0.
-Use agentRole to match task types. Output JSON.`,
+          systemInstruction: `You are the Morssel Schema Sentinel. 
+1. Perform Cycle Detection: ensure this task doesn't create a circular recursion.
+2. Align Schema: ensure terminology matches siblings.
+3. Fetch Best Practices using Google Search.
+Output JSON.`,
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isValid: { type: Type.BOOLEAN },
+              error: { type: Type.STRING },
+              recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
+              pitfalls: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ["isValid", "recommendations", "pitfalls"]
+          }
+        }
+      });
+      
+      // Extract grounding URLs from search grounding chunks
+      const urls = response.candidates?.[0]?.groundingMetadata?.groundingChunks
+        ?.filter(chunk => chunk.web)
+        ?.map(chunk => ({ title: chunk.web!.title, uri: chunk.web!.uri })) || [];
+      
+      const text = response.text || "{}";
+      return { ...JSON.parse(this.cleanJson(text)), urls };
+    });
+  }
+
+  /**
+   * BUSINESS AUDITOR: Silver -> Gold transition
+   */
+  async auditTask(task: Task): Promise<{ approved: boolean, feedback: string }> {
+    return this.callWithRetry(async () => {
+      const ai = this.getClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-pro-preview',
+        contents: `GOLD AUDIT: "${task.title}"\nPATH: ${task.hierarchyPath}\nOUTPUT:\n${task.outputData?.result}`,
+        config: {
+          systemInstruction: `You are the Gold Layer Auditor. 
+Check if the output is business-consumable. If the hierarchy path logic is inconsistent, reject.
+Output JSON.`,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              approved: { type: Type.BOOLEAN },
+              feedback: { type: Type.STRING }
+            },
+            required: ["approved", "feedback"]
+          }
+        }
+      });
+      const text = response.text || "{}";
+      return JSON.parse(this.cleanJson(text));
+    });
+  }
+
+  async planWorkflow(goal: string, branching: number): Promise<{ projectName: string, tasks: any[] }> {
+    return this.callWithRetry(async () => {
+      const ai = this.getClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: `Architect "${goal}". Width: ${branching}.`,
+        config: {
+          systemInstruction: `Initial Bronze Ingestion. Plan high-level nodes. Output JSON.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -68,29 +144,19 @@ Use agentRole to match task types. Output JSON.`,
           }
         }
       });
-      return JSON.parse(response.text.trim());
+      const text = response.text || "{}";
+      return JSON.parse(this.cleanJson(text));
     });
   }
 
-  /**
-   * MORSSEL JUDGE: Now with Depth Awareness
-   */
   async judgeTask(task: Task, globalMemory: string): Promise<{ decision: 'execute' | 'decompose' | 'prune', reasoning: string }> {
-    const currentDepth = task.depth || 0;
-    const isAtLimit = currentDepth >= this.MAX_DEPTH;
-
     return this.callWithRetry(async () => {
-      const response = await this.ai.models.generateContent({
+      const ai = this.getClient();
+      const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `JUDGE TASK [Level ${currentDepth}]: "${task.title}"\nDESC: ${task.description}\nCONTEXT: ${globalMemory}\nRECURSION_LIMIT: ${this.MAX_DEPTH}`,
+        contents: `JUDGE [Path: ${task.hierarchyPath}]: "${task.title}"\nCONTEXT: ${globalMemory}`,
         config: {
-          systemInstruction: `You are the Morssel Efficiency Judge.
-IMPORTANT: Current recursion level is ${currentDepth}. Max allowed is ${this.MAX_DEPTH}.
-1. If current level >= ${this.MAX_DEPTH}, decision MUST be 'execute' or 'prune'. NEVER 'decompose'.
-2. If task is already fulfilled by memory, decision = 'prune'.
-3. If task is a broad macro and level < ${this.MAX_DEPTH}, decision = 'decompose'.
-4. Otherwise, 'execute'.
-Output JSON.`,
+          systemInstruction: `Recursion Manager. Decision: execute/decompose/prune. Output JSON.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -102,19 +168,19 @@ Output JSON.`,
           }
         }
       });
-      return JSON.parse(response.text.trim());
+      const text = response.text || "{}";
+      return JSON.parse(this.cleanJson(text));
     });
   }
 
-  async decomposeTask(task: Task, context: string): Promise<{ subtasks: any[] }> {
-    const nextDepth = (task.depth || 0) + 1;
+  async decomposeTask(task: Task, context: string, branching: number): Promise<{ subtasks: any[] }> {
     return this.callWithRetry(async () => {
-      const response = await this.ai.models.generateContent({
+      const ai = this.getClient();
+      const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Decompose task: "${task.title}" (Level ${task.depth} -> ${nextDepth})\nDescription: ${task.description}\nContext: ${context}`,
+        contents: `Decompose "${task.title}". Path: ${task.hierarchyPath}. Branching: ${branching}.`,
         config: {
-          systemInstruction: `Morssel Orchestrator: Break this task into 2-3 granular Level ${nextDepth} sub-tasks.
-Level ${nextDepth} must be much more specific than Level ${task.depth}. Output JSON.`,
+          systemInstruction: `Recursive Decomposition. Create specific children. Output JSON.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -137,20 +203,26 @@ Level ${nextDepth} must be much more specific than Level ${task.depth}. Output J
           }
         }
       });
-      return JSON.parse(response.text.trim());
+      const text = response.text || "{}";
+      return JSON.parse(this.cleanJson(text));
     });
   }
 
   async executeTask(task: Task, agent: Agent, memoryBank: string): Promise<string> {
+    const feedback = task.auditFeedback ? `\nFIX FEEDBACK: ${task.auditFeedback}` : '';
     return this.callWithRetry(async () => {
-      const response = await this.ai.models.generateContent({
-        model: agent.model.modelId || 'gemini-3-flash-preview',
-        contents: `LEVEL ${task.depth} EXECUTION: ${task.title}\nDESC: ${task.description}\nCONTEXT:\n${memoryBank}`,
-        config: {
-          systemInstruction: agent.systemPrompt,
-        }
+      const ai = this.getClient();
+      // Enforce use of allowed models
+      const modelToUse = agent.model.modelId && !['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro', 'gemini-pro'].includes(agent.model.modelId)
+        ? agent.model.modelId 
+        : 'gemini-3-flash-preview';
+        
+      const response = await ai.models.generateContent({
+        model: modelToUse,
+        contents: `EXECUTE [${task.hierarchyPath}]: ${task.title}\nCONTEXT:\n${memoryBank}${feedback}`,
+        config: { systemInstruction: agent.systemPrompt }
       });
-      return response.text.trim();
+      return response.text || "No output generated.";
     });
   }
 }

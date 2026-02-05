@@ -1,7 +1,9 @@
 
 import React from 'react';
-import { Activity, Share2, Users, Terminal, Settings, Zap, FolderOpen, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { Activity, Share2, Users, Terminal, Settings, Zap, FolderOpen, FileText, ChevronDown, ChevronRight, LogOut, User as UserIcon, Layout, Database } from 'lucide-react';
 import { ViewMode, ThemeMode, Flow } from '../types';
+import { signOut } from 'firebase/auth';
+import { auth } from '../services/firebase';
 
 interface SidebarProps {
   activeView: ViewMode;
@@ -17,6 +19,14 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ 
   activeView, setActiveView, theme, flows, activeFlowIndex, setActiveFlowIndex, isCollapsed 
 }) => {
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error("Logout failed:", err);
+    }
+  };
+
   return (
     <nav className={`shrink-0 border-r flex flex-col transition-all duration-500 ${isCollapsed ? 'w-20' : 'w-64'} ${theme === 'dark' ? 'bg-slate-900 border-white/10' : 'bg-white border-black/5 shadow-xl'}`}>
       <div className={`p-6 flex items-center gap-4 overflow-hidden ${isCollapsed ? 'justify-center' : ''}`}>
@@ -31,20 +41,19 @@ const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Project Selector */}
       <div className="px-4 mb-6">
         {!isCollapsed && (
           <div className="flex items-center justify-between px-2 mb-2 animate-in fade-in duration-300">
-            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Active Projects</span>
+            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Missions Archive</span>
             <FolderOpen size={10} className="text-slate-500" />
           </div>
         )}
-        <div className="space-y-1">
+        <div className="space-y-1 max-h-40 overflow-y-auto custom-scrollbar">
           {flows.map((flow, idx) => (
             <button
               key={flow.id}
-              onClick={() => setActiveFlowIndex(idx)}
-              className={`w-full flex items-center gap-3 p-2.5 rounded-xl transition-all text-left ${idx === activeFlowIndex ? 'bg-blue-600/10 text-blue-500 border border-blue-500/20' : 'text-slate-500 hover:bg-slate-800/50'} ${isCollapsed ? 'justify-center' : ''}`}
+              onClick={() => { setActiveFlowIndex(idx); setActiveView('flow'); }}
+              className={`w-full flex items-center gap-3 p-2.5 rounded-xl transition-all text-left ${idx === activeFlowIndex && activeView === 'flow' ? 'bg-blue-600/10 text-blue-500 border border-blue-500/20' : 'text-slate-500 hover:bg-slate-800/50'} ${isCollapsed ? 'justify-center' : ''}`}
               title={flow.name}
             >
               <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${idx === activeFlowIndex ? 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]' : 'bg-slate-700'}`} />
@@ -54,7 +63,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      <div className="flex-1 px-4 space-y-2">
+      <div className="flex-1 px-4 space-y-2 overflow-y-auto custom-scrollbar">
         {!isCollapsed && (
           <div className="px-2 mb-2 mt-4 animate-in fade-in duration-300">
             <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Management</span>
@@ -101,9 +110,29 @@ const Sidebar: React.FC<SidebarProps> = ({
           onClick={() => setActiveView('mcp')} 
           isCollapsed={isCollapsed}
         />
+
+        {!isCollapsed && (
+          <div className="px-2 mb-2 mt-6 animate-in fade-in duration-300">
+            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Account</span>
+          </div>
+        )}
+        <NavItem 
+          icon={<UserIcon size={20} />} 
+          label="Profile & Projects" 
+          active={activeView === 'profile'} 
+          onClick={() => setActiveView('profile')} 
+          isCollapsed={isCollapsed}
+        />
       </div>
 
       <div className="p-4 border-t border-white/5 space-y-2">
+        {/* SQL STATUS INDICATOR */}
+        {!isCollapsed && (
+          <div className="mb-2 px-3 py-2 bg-emerald-500/5 border border-emerald-500/10 rounded-xl flex items-center gap-2">
+            <Database size={12} className="text-emerald-500" />
+            <span className="text-[8px] font-black uppercase tracking-widest text-emerald-500">Hostinger srv1425 ACTIVE</span>
+          </div>
+        )}
         <NavItem 
           icon={<Settings size={20} />} 
           label="System Config" 
@@ -111,6 +140,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           onClick={() => setActiveView('settings')} 
           isCollapsed={isCollapsed}
         />
+        <button 
+          onClick={handleSignOut}
+          title={isCollapsed ? "Sign Out" : ""}
+          className={`
+            w-full flex items-center gap-3 p-3 rounded-2xl transition-all duration-300 text-red-500 hover:bg-red-500/10
+            ${isCollapsed ? 'justify-center' : ''}
+          `}
+        >
+          <LogOut size={20} />
+          {!isCollapsed && <span className="text-sm font-bold tracking-wide animate-in fade-in duration-300">Sign Out</span>}
+        </button>
       </div>
     </nav>
   );

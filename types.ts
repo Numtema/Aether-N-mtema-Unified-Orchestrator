@@ -3,6 +3,7 @@ export type MCPTransportType = 'stdio' | 'sse' | 'gitmcp' | 'tomcp';
 
 export interface MCPConfig {
   id: string;
+  ownerId: string;
   name: string;
   type: MCPTransportType;
   command?: string;
@@ -16,11 +17,12 @@ export interface MCPConfig {
     logging: boolean;
   };
   status: 'connected' | 'disconnected' | 'error';
-  lastSync: Date;
+  lastSync: any;
 }
 
 export interface Agent {
   id: string;
+  ownerId: string;
   name: string;
   role: string;
   systemPrompt: string;
@@ -37,14 +39,31 @@ export interface Agent {
   };
 }
 
-export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'waiting_approval' | 'completed' | 'failed' | 'decomposing' | 'pruned';
+export type MedallionStage = 'BRONZE' | 'SILVER' | 'GOLD';
+
+export type TaskStatus = 
+  | 'backlog' 
+  | 'todo' 
+  | 'in_progress' 
+  | 'waiting_approval' 
+  | 'completed' 
+  | 'failed' 
+  | 'decomposing' 
+  | 'pruned' 
+  | 'anticipating' 
+  | 'auditing' 
+  | 'rejected'
+  | 'integrating';
 
 export interface Task {
   id: string;
   flowId: string;
+  ownerId: string;
   title: string;
   description: string;
   status: TaskStatus;
+  medallionStage: MedallionStage;
+  hierarchyPath: string;
   assignedAgentId?: string;
   dependencies: string[];
   parentTaskId?: string;
@@ -57,6 +76,11 @@ export interface Task {
   };
   requiresApproval: boolean;
   error?: string;
+  recommendations?: string[];
+  pitfalls?: string[];
+  groundingUrls?: { title: string; uri: string }[];
+  auditFeedback?: string;
+  retryCount?: number;
 }
 
 export interface MorsselTelemetry {
@@ -64,11 +88,25 @@ export interface MorsselTelemetry {
   totalTokensEstimate: number;
   contextLoad: number;
   memoryBankSize: number;
-  prunedTasksCount: number; // New: tracking efficiency
+  prunedTasksCount: number;
+  branchingFactor: number;
+  auditPassRate: number;
+  integrityScore: number;
+}
+
+export interface Project {
+  id: string;
+  ownerId: string;
+  name: string;
+  description: string;
+  createdAt: any;
+  updatedAt: any;
 }
 
 export interface Flow {
   id: string;
+  projectId: string; // Grouping missions under a project
+  ownerId: string;
   name: string;
   teamId: string;
   status: 'idle' | 'running' | 'paused' | 'completed' | 'failed';
@@ -79,7 +117,8 @@ export interface Flow {
     nodes: string[];
     edges: { source: string; target: string; condition?: string }[];
   };
+  createdAt?: any;
 }
 
-export type ViewMode = 'flow' | 'dag' | 'agents' | 'mcp' | 'settings' | 'artifacts';
+export type ViewMode = 'flow' | 'dag' | 'agents' | 'mcp' | 'settings' | 'artifacts' | 'profile' | 'projects';
 export type ThemeMode = 'dark' | 'light';
